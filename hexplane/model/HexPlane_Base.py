@@ -324,11 +324,17 @@ class HexPlane_Base(torch.nn.Module):
         """
         N_samples = N_samples if N_samples > 0 else self.nSamples
         near, far = self.near_far
+        # interpx原本是一个一维数据结构[B] 使用unsqueeze(0) 拓展为二维[1,B]
         interpx = torch.linspace(near, far, N_samples).unsqueeze(0).to(rays_o)
         if is_train:
+            # rand_like(interpx) 作用是生成一个跟interpx结构完全一样 但数据是随机（0~1）的数据结构
+            # .to(rays_o)将随机的数据放到和rays_o一样的设备以及使用一样的数据类型（比如float 32）
+            # ((far - near) / N_samples) 这里计算的是采样点之间的间隔  把（0~1）映射到间隔区域中去
             interpx += torch.rand_like(interpx).to(rays_o) * ((far - near) / N_samples)
 
         rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * interpx[..., None]
+        # aabb[0]表示的是三个维度的最小值[xmin, ymin, zmin] 
+        # 同理aabb[1]表示的是三个维度的最大值[xmax, ymax, zmax]
         mask_outbbox = ((self.aabb[0] > rays_pts) | (rays_pts > self.aabb[1])).any(
             dim=-1
         )
@@ -428,6 +434,8 @@ class HexPlane_Base(torch.nn.Module):
         """
         Forward pass of the HexPlane.
 
+        Hexplane前向传播  也就是计算估计值的部分
+
         Args:
             rays_chunk: (B, 6) tensor, rays [rays_o, rays_d].
             frame_time: (B, 1) tensor, time values.
@@ -443,18 +451,26 @@ class HexPlane_Base(torch.nn.Module):
             z_vals: (B, N_samples) tensor, z values.
         """
         # Prepare rays.
+        # rays_chunk[:, 3:6]取出所有射线的方向向量 形状 (B, 3)
         viewdirs = rays_chunk[:, 3:6]
+        # rays_chunk[:, :3]取出所有射线的起点坐标位置 形状 (B, 3)
+        # sample_rays方法返回所有采样点的位置坐标 以及和orgin相机点之间的距离信息 
+        # 以及对应点是否合法的一个ray_valid数组
         xyz_sampled, z_vals, ray_valid = self.sample_rays(
             rays_chunk[:, :3], viewdirs, is_train=is_train, N_samples=N_samples
         )
+        # 获得采样点之间的距离 最后补了一个0
         dists = torch.cat(
             (z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])), dim=-1
         )
+        # 语义为使用最后一个维度的数据进行向量长度的计算  
+        # 然后将得到的这个标量值保存到原本的这一维保存下来
         rays_norm = torch.norm(viewdirs, dim=-1, keepdim=True)
         if ndc_ray:
             dists = dists * rays_norm
         viewdirs = viewdirs / rays_norm
-
+        # 所以这里处理过之后  viewdirs就变成了[B,N,3]的结构
+        # 也就是B条射线  射线上N个采样点 每个点是3维的xyz
         viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
         frame_time = frame_time.view(-1, 1, 1).expand(
             xyz_sampled.shape[0], xyz_sampled.shape[1], 1
@@ -472,6 +488,7 @@ class HexPlane_Base(torch.nn.Module):
             ray_valid = ~ray_invalid
 
         # Initialize sigma and rgb values.
+        # 初始化用来保存对应采样点的密度和颜色信息的张量
         sigma = torch.zeros(xyz_sampled.shape[:-1], device=xyz_sampled.device)
         rgb = torch.zeros((*xyz_sampled.shape[:2], 3), device=xyz_sampled.device)
 

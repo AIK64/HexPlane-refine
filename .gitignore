@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 
 .vscode/
+
+# Training logs and experiment outputs
+/logs/

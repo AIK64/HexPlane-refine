@@ -1,5 +1,8 @@
+import json
 import math
 import sys
+import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -239,6 +242,12 @@ class Trainer:
 
     def train(self):
         torch.cuda.empty_cache()
+        training_device = torch.device(self.device)
+        uses_cuda = training_device.type == "cuda"
+        if uses_cuda:
+            torch.cuda.synchronize(training_device)
+            torch.cuda.reset_peak_memory_stats(training_device)
+        start_time = time.perf_counter()
 
         # load the training and testing dataset and other settings.
         train_dataset = self.train_dataset
@@ -268,7 +277,7 @@ class Trainer:
                 alldepths = train_dataset.all_depths
             else:
                 alldepths = None
-
+            # 过滤掉不我们的aabb包围盒相交的光线
             allrays, allrgbs, alltimes, alldepths = model.filtering_rays(
                 allrays, allrgbs, alltimes, alldepths, bbox_only=True
             )
@@ -280,9 +289,12 @@ class Trainer:
         # initialize the data sampler
         self.init_sampler(train_dataset)
         # precompute the voxel upsample list
+        # 作用就是生成一组上采样的计划空间体素分辨率数组，以及时间分辨率数据
+        # 比如N_voxel_list = [128000, 256000, 512000]  到达制定轮次的时候增加到指定的分辨率
         self.get_voxel_upsample_list()
 
         # Initialiaze TV loss on planse
+        # Total Variation Loss（总变分损失） 主要实现奖励相邻特征之间的平滑
         tvreg_s = TVLoss()  # TV loss on the spatial planes
         tvreg_s_t = TVLoss(
             1.0, self.cfg.model.TV_t_s_ratio
@@ -298,6 +310,8 @@ class Trainer:
         torch.cuda.empty_cache()
 
         # Initialize the optimizer
+        # 取出模型中可供学习的参数  并且对于不同类别的参数进行了分组  
+        # 比如特征平面参数  MLP参数  其他参数  这样对于不同组的参数可以设置不同的学习率
         grad_vars = model.get_optparam_groups(self.cfg.optim)
         optimizer = torch.optim.Adam(
             grad_vars, betas=(self.cfg.optim.beta1, self.cfg.optim.beta2)
@@ -305,10 +319,12 @@ class Trainer:
 
         for iteration in pbar:
             # Sample dat
+            # 获取本轮的batchsize组对应的真值ray数据
             rays_train, rgb_train, frame_time, depth = self.sample_data(
                 train_dataset, iteration
             )
             # Render the rgb values of rays
+            # 使用模型计算估计值
             rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(
                 rays_train,
                 frame_time,
@@ -471,3 +487,38 @@ class Trainer:
                 optimizer = torch.optim.Adam(
                     grad_vars, betas=(self.cfg.optim.beta1, self.cfg.optim.beta2)
                 )
+
+        # Includes initialization, in-loop evaluation, mask updates and upsampling.
+        # Final rendering performed after train() returns is excluded.
+        if uses_cuda:
+            torch.cuda.synchronize(training_device)
+        elapsed_seconds = time.perf_counter() - start_time
+        peak_allocated_gib = (
+            torch.cuda.max_memory_allocated(training_device) / 1024**3
+            if uses_cuda else None
+        )
+        peak_reserved_gib = (
+            torch.cuda.max_memory_reserved(training_device) / 1024**3
+            if uses_cuda else None
+        )
+        training_stats = {
+            "scope": "train() including initialization and in-loop evaluation; excludes final rendering",
+            "iterations": self.cfg.optim.n_iters,
+            "device": str(training_device),
+            "elapsed_seconds": elapsed_seconds,
+            "peak_allocated_gib": peak_allocated_gib,
+            "peak_reserved_gib": peak_reserved_gib,
+        }
+        stats_path = Path(self.logfolder) / "training_stats.json"
+        with stats_path.open("w", encoding="utf-8") as stats_file:
+            json.dump(training_stats, stats_file, indent=2)
+            stats_file.write("\n")
+
+        print(
+            f"Training time: {elapsed_seconds:.2f} seconds "
+            f"({elapsed_seconds / 60:.2f} minutes)"
+        )
+        if uses_cuda:
+            print(f"Peak allocated GPU memory: {peak_allocated_gib:.2f} GiB")
+            print(f"Peak reserved GPU memory: {peak_reserved_gib:.2f} GiB")
+        print(f"Training statistics saved to {stats_path}")

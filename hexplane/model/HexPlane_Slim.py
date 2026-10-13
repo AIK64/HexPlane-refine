@@ -161,6 +161,12 @@ class HexPlane_Slim(HexPlane_Base):
             .detach()
             .view(3, -1, 1, 2)
         )
+        # 总之前边初始化的部分将数据转换为：
+        # 一个点 (x, y, z, t)
+        #   ↓
+        # 空间组：[x,y]  [x,z]  [y,z]
+        # 时空组：[t,z]  [t,y]  [t,x]
+        
 
         density_feature = torch.zeros(
             (xyz_sampled.shape[0],), device=xyz_sampled.device

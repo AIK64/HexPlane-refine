@@ -23,6 +23,8 @@ def OctreeRender_trilinear_fast(
 ):
     """
     Batched rendering function.
+    实现对于一批数据的渲染的功能
+    返回模型预测得到的结果
     """
     rgbs, alphas, depth_maps, z_vals = [], [], [], []
     N_rays_all = rays.shape[0]
@@ -30,6 +32,11 @@ def OctreeRender_trilinear_fast(
         rays_chunk = rays[chunk_idx * chunk : (chunk_idx + 1) * chunk].to(device)
         time_chunk = time[chunk_idx * chunk : (chunk_idx + 1) * chunk].to(device)
 
+        # 实现对于一个batch的射线的预测计算
+        # rgb_map：  [B, 3]  每条射线的最终 RGB
+        # depth_map：[B]     每条射线的深度
+        # alpha：    [B, N]  每个采样点的不透明度
+        # z_vals：   [B, N]  沿射线的采样位置（也可能是共享的 [1, N]）
         rgb_map, depth_map, alpha_map, z_val_map = model(
             rays_chunk,
             time_chunk,
