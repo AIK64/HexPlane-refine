@@ -522,6 +522,8 @@ class HexPlane_Base(torch.nn.Module):
                 frame_time[app_mask],
             )
             rgb[app_mask] = valid_rgbs
+        # 这里weight是每个对应的点的权重信息了
+
         acc_map = torch.sum(weight, -1)
         rgb_map = torch.sum(weight[..., None] * rgb, -2)
 

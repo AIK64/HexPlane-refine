@@ -77,6 +77,8 @@ def render_test(cfg):
 
 
 def reconstruction(cfg):
+    # rays类型 对应is_stack=False 是将所有帧中的像素射线展平成一个集合 然后从中抽取射线进行训练
+    # 其他值 对应is_stack=true 是保留原本按帧和图像组织的数据  然后后续按照图像或者分层的方法采样
     if cfg.data.datasampler_type == "rays":
         train_dataset = get_train_dataset(cfg, is_stack=False)
     else:

@@ -242,6 +242,7 @@ class Trainer:
 
     def train(self):
         torch.cuda.empty_cache()
+        # 训练统计：同步 GPU 后开始计时，并重置本次训练的显存峰值。
         training_device = torch.device(self.device)
         uses_cuda = training_device.type == "cuda"
         if uses_cuda:
@@ -300,6 +301,7 @@ class Trainer:
             1.0, self.cfg.model.TV_t_s_ratio
         )  # TV loss on the spatial-temporal planes
 
+        # 这里是创建了进度条
         pbar = tqdm(
             range(self.cfg.optim.n_iters),
             miniters=self.cfg.systems.progress_refresh_rate,
@@ -488,8 +490,7 @@ class Trainer:
                     grad_vars, betas=(self.cfg.optim.beta1, self.cfg.optim.beta2)
                 )
 
-        # Includes initialization, in-loop evaluation, mask updates and upsampling.
-        # Final rendering performed after train() returns is excluded.
+        # 训练统计：包含初始化、循环内评估、掩码更新和上采样；不含最终渲染。
         if uses_cuda:
             torch.cuda.synchronize(training_device)
         elapsed_seconds = time.perf_counter() - start_time
@@ -506,13 +507,33 @@ class Trainer:
             "iterations": self.cfg.optim.n_iters,
             "device": str(training_device),
             "elapsed_seconds": elapsed_seconds,
+            "elapsed_minutes": elapsed_seconds / 60,
             "peak_allocated_gib": peak_allocated_gib,
             "peak_reserved_gib": peak_reserved_gib,
         }
         stats_path = Path(self.logfolder) / "training_stats.json"
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
         with stats_path.open("w", encoding="utf-8") as stats_file:
             json.dump(training_stats, stats_file, indent=2)
             stats_file.write("\n")
+
+        # 同时写入 TensorBoard，便于和训练指标一起查看。
+        stats_step = self.cfg.optim.n_iters
+        summary_writer.add_scalar(
+            "performance/train_time_seconds", elapsed_seconds, global_step=stats_step
+        )
+        if uses_cuda:
+            summary_writer.add_scalar(
+                "performance/peak_allocated_gib",
+                peak_allocated_gib,
+                global_step=stats_step,
+            )
+            summary_writer.add_scalar(
+                "performance/peak_reserved_gib",
+                peak_reserved_gib,
+                global_step=stats_step,
+            )
+        summary_writer.flush()
 
         print(
             f"Training time: {elapsed_seconds:.2f} seconds "
