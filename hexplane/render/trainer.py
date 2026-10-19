@@ -387,6 +387,7 @@ class Trainer:
                     "train/reg_l1_app", loss_l1.detach().item(), global_step=iteration
                 )
 
+            # 当深度启用时 对于深度损失的处理
             # Loss on the rendered and gt depth maps.
             if self.cfg.model.depth_loss and self.cfg.model.depth_loss_weight > 0:
                 depth_loss = (depth_map.unsqueeze(-1) - depth) ** 2
