@@ -27,6 +27,7 @@ def render_test(cfg):
         return
 
     HexPlane = torch.load(cfg.systems.ckpt, map_location=device)
+    HexPlane.depth_render_mode = cfg.model.depth_render_mode
     logfolder = os.path.dirname(cfg.systems.ckpt)
 
     if cfg.render_train:

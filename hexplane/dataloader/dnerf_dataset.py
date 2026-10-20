@@ -1,8 +1,10 @@
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms as T
@@ -68,6 +70,10 @@ class DNerfDataset(Dataset):
         scene_bbox_min=[-1.0, -1.0, -1.0],
         scene_bbox_max=[1.0, 1.0, 1.0],
         N_random_pose=1000,
+        depth_dir=None,
+        depth_file_pattern="{stem}.npy",
+        depth_type="ray_distance",
+        depth_scale=1.0,
     ):
         self.root_dir = datadir
         self.split = split
@@ -75,6 +81,21 @@ class DNerfDataset(Dataset):
         self.img_wh = (int(800 / downsample), int(800 / downsample))
         self.is_stack = is_stack
         self.N_vis = N_vis  # evaluate images for every N_vis images
+        self.depth_data = depth_dir is not None
+        self.depth_dir = None
+        if self.depth_data:
+            self.depth_dir = Path(depth_dir)
+            if not self.depth_dir.is_absolute():
+                self.depth_dir = Path(datadir) / self.depth_dir
+            if not self.depth_dir.is_dir():
+                raise FileNotFoundError(f"Reference depth directory does not exist: {self.depth_dir}")
+        if depth_type not in ("ray_distance", "camera_z"):
+            raise ValueError("depth_type must be 'ray_distance' or 'camera_z'.")
+        if not np.isfinite(depth_scale) or depth_scale <= 0:
+            raise ValueError("depth_scale must be finite and positive.")
+        self.depth_file_pattern = depth_file_pattern
+        self.depth_type = depth_type
+        self.depth_scale = depth_scale
 
         self.time_scale = time_scale
         self.world_bound_scale = 1.1
@@ -101,7 +122,6 @@ class DNerfDataset(Dataset):
 
         self.white_bg = True
         self.ndc_ray = False
-        self.depth_data = False
 
         self.N_random_pose = N_random_pose
         self.center = torch.mean(self.scene_bbox, axis=0).float().view(1, 1, 3)
@@ -149,8 +169,54 @@ class DNerfDataset(Dataset):
         return xyz_min, xyz_max
 
     def read_depth(self, filename):
-        depth = np.array(read_pfm(filename)[0], dtype=np.float32)  # (800, 800)
+        filename = Path(filename)
+        if filename.suffix.lower() == ".npy":
+            depth = np.load(filename, allow_pickle=False)
+        elif filename.suffix.lower() == ".pfm":
+            depth = read_pfm(str(filename))[0]
+        elif filename.suffix.lower() in (".png", ".tif", ".tiff"):
+            with Image.open(filename) as image:
+                depth = np.array(image)
+        else:
+            raise ValueError(f"Unsupported depth format: {filename.suffix}")
+        depth = np.asarray(depth, dtype=np.float32)
+        if depth.ndim != 2:
+            raise ValueError(f"Depth must be a scalar H x W image: {filename}, {depth.shape}")
         return depth
+
+    def load_frame_depth(self, frame, original_wh, alpha):
+        frame_path = Path(frame["file_path"])
+        relative_path = self.depth_file_pattern.format(
+            stem=frame_path.stem,
+            frame=frame_path.with_suffix("").as_posix(),
+            split=self.split,
+        )
+        filename = self.depth_dir / relative_path
+        if not filename.is_file():
+            raise FileNotFoundError(f"Missing reference depth for {frame['file_path']}: {filename}")
+        depth = torch.from_numpy(np.ascontiguousarray(self.read_depth(filename)))
+        if tuple(depth.shape) != (original_wh[1], original_wh[0]):
+            raise ValueError(
+                f"Depth and original RGB resolution must match: {filename}, "
+                f"depth {tuple(depth.shape)}, RGB {original_wh[::-1]}"
+            )
+        depth = depth * self.depth_scale
+        depth = torch.where(torch.isfinite(depth) & (depth > 0), depth, 0)
+        # Nearest sampling avoids blending valid depths across invalid pixels or edges.
+        depth = F.interpolate(
+            depth[None, None], size=self.img_wh[::-1], mode="nearest"
+        )[0, 0]
+        alpha = F.interpolate(
+            alpha.float()[None, None], size=self.img_wh[::-1], mode="nearest"
+        )[0, 0]
+        if self.depth_type == "camera_z":
+            depth = depth / self.directions[..., 2].abs().clamp_min(1e-8)
+        depth = depth.reshape(-1, 1)
+        valid = (
+            torch.isfinite(depth) & (depth >= self.near) & (depth <= self.far)
+            & (alpha.reshape(-1, 1) > 0)
+        )
+        return torch.where(valid, depth, 0)
 
     def read_meta(self):
         with open(os.path.join(self.root_dir, f"transforms_{self.split}.json")) as f:
@@ -180,10 +246,10 @@ class DNerfDataset(Dataset):
         self.all_rays = []
         self.all_times = []
         self.all_rgbs = []
-        self.all_depth = []
+        self.all_depths = [] if self.depth_data else None
 
         img_eval_interval = (
-            1 if self.N_vis < 0 else len(self.meta["frames"]) // self.N_vis
+            1 if self.N_vis <= 0 else max(len(self.meta["frames"]) // self.N_vis, 1)
         )
         idxs = list(range(0, len(self.meta["frames"]), img_eval_interval))
         for i in tqdm(
@@ -197,11 +263,17 @@ class DNerfDataset(Dataset):
             image_path = os.path.join(self.root_dir, f"{frame['file_path']}.png")
             self.image_paths += [image_path]
             img = Image.open(image_path)
+            original_wh = img.size
+            original_alpha = (
+                torch.from_numpy(np.array(img.getchannel("A"))) if self.depth_data else None
+            )
 
             if self.downsample != 1.0:
                 img = img.resize(self.img_wh, Image.LANCZOS)
             img = self.transform(img)  # (4, h, w)
             img = img.view(4, -1).permute(1, 0)  # (h*w, 4) RGBA
+            if self.depth_data:
+                self.all_depths.append(self.load_frame_depth(frame, original_wh, original_alpha))
             img = img[:, :3] * img[:, -1:] + (
                 1 - img[:, -1:]
             )  # blend A to RGB, white background
@@ -227,6 +299,8 @@ class DNerfDataset(Dataset):
                 self.all_rgbs, 0
             )  # (len(self.meta['frames])*h*w, 3)
             self.all_times = torch.cat(self.all_times, 0)
+            if self.depth_data:
+                self.all_depths = torch.cat(self.all_depths, 0)
 
         else:
             self.all_rays = torch.stack(
@@ -236,6 +310,16 @@ class DNerfDataset(Dataset):
                 -1, *self.img_wh[::-1], 3
             )  # (len(self.meta['frames]),h,w,3)
             self.all_times = torch.stack(self.all_times, 0)
+            if self.depth_data:
+                self.all_depths = torch.stack(self.all_depths, 0).reshape(
+                    -1, *self.img_wh[::-1], 1
+                )
+
+        if self.depth_data and not (self.all_depths > 0).any():
+            raise ValueError(
+                "No valid reference depths remain. Check depth_type, depth_scale, "
+                "foreground coverage and the scene near/far range."
+            )
 
         self.all_times = self.time_scale * (self.all_times * 2.0 - 1.0)
 
@@ -292,6 +376,8 @@ class DNerfDataset(Dataset):
             rays = self.all_rays[idx]
             time = self.all_times[idx]
             sample = {"rays": rays, "rgbs": img, "time": time}
+        if self.depth_data:
+            sample["depths"] = self.all_depths[idx]
         return sample
 
     def get_random_pose(self, batch_size, patch_size, batching="all_images"):

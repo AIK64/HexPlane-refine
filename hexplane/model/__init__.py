@@ -19,4 +19,7 @@ def init_model(cfg, aabb, near_far, device):
         model = eval(cfg.model.model_name)(
             aabb, reso_cur, device, cfg.model.time_grid_init, near_far, **cfg.model
         )
+    # A whole-model checkpoint may retain the old depth/no-grad settings.
+    model.depth_loss = cfg.model.depth_loss and cfg.model.depth_loss_weight > 0
+    model.depth_render_mode = cfg.model.depth_render_mode
     return model, reso_cur

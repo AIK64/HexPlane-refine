@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from tqdm.auto import tqdm
+from hexplane.depth import masked_depth_mse
 
 from hexplane.render.render import OctreeRender_trilinear_fast as renderer
 from hexplane.render.render import evaluation
@@ -54,6 +55,22 @@ class Trainer:
         self.summary_writer = summary_writer
         self.logfolder = logfolder
         self.device = device
+        self.depth_data = bool(getattr(train_dataset, "depth_data", False))
+        if cfg.model.depth_loss_weight < 0:
+            raise ValueError("depth_loss_weight must be non-negative.")
+        self.depth_supervision = cfg.model.depth_loss and cfg.model.depth_loss_weight > 0
+        if self.depth_supervision and not self.depth_data:
+            raise ValueError(
+                "Depth loss is enabled but the training dataset has no reference depths. "
+                "For DNeRF, configure data.depth_train_dir and the depth format/scale."
+            )
+        if self.depth_supervision and train_dataset.ndc_ray:
+            raise ValueError(
+                "Metric depth supervision for neural3D_NDC is not supported: "
+                "reference distances must first be converted to NDC ray parameters."
+            )
+        self.model.depth_loss = self.depth_supervision
+        self.model.depth_render_mode = cfg.model.depth_render_mode
 
     def get_lr_decay_factor(self, step):
         """
@@ -130,15 +147,15 @@ class Trainer:
                 data["time"],
             )
             if self.depth_data:
-                train_depth = data["depths"].to(self.device)
+                train_depth = data["depths"].to(self.device).reshape(-1, 1)
         # sample images: randomly pick one image from the training dataset and sample a batch of rays from all the rays of the image.
         elif self.cfg.data.datasampler_type == "images":
             img_i = self.sampler.nextids()
             data = train_dataset[img_i]
             rays_train, rgb_train, frame_time = (
-                data["rays"],
+                data["rays"].reshape(-1, 6),
                 data["rgbs"].to(self.device).view(-1, 3),
-                data["time"],
+                data["time"].reshape(-1, 1),
             )
             select_inds = torch.randperm(rays_train.shape[0])[
                 : self.cfg.optim.batch_size
@@ -167,6 +184,7 @@ class Trainer:
                 frame_time = train_dataset.all_times[
                     cam_i, index_i * self.cfg.data.key_f_num
                 ]
+                depth_index = index_i * self.cfg.data.key_f_num
                 # Calcualte the probability of sampling each ray based on the difference of global median and local values.
                 probability = GM_Resi(
                     rgb_train, self.global_mean[cam_i], self.cfg.data.stage_1_gamma
@@ -189,6 +207,7 @@ class Trainer:
                 )
                 rays_train = train_dataset.all_rays[cam_i].view(-1, 6)
                 frame_time = train_dataset.all_times[cam_i, index_i]
+                depth_index = index_i
                 probability = GM_Resi(
                     rgb_train, self.global_mean[cam_i], self.cfg.data.stage_2_gamma
                 )
@@ -216,6 +235,7 @@ class Trainer:
                 )
                 rays_train = train_dataset.all_rays[cam_i].view(-1, 6)
                 frame_time = train_dataset.all_times[cam_i, index_i]
+                depth_index = index_i
                 # Calcualte the temporal difference between the two frames as sampling probability.
                 probability = torch.clamp(
                     1 / 3 * torch.norm(rgb_train - rgb_ref, p=1, dim=-1),
@@ -227,6 +247,9 @@ class Trainer:
                 rays_train = rays_train[select_inds]
                 rgb_train = rgb_train[select_inds]
                 frame_time = torch.ones_like(rays_train[:, 0:1]) * frame_time
+            if self.depth_data:
+                depths = train_dataset.all_depths[cam_i, depth_index].reshape(-1, 1)
+                train_depth = depths[select_inds.to(depths.device)].to(self.device)
         return rays_train, rgb_train, frame_time, train_depth
 
     def init_sampler(self, train_dataset):
@@ -254,7 +277,7 @@ class Trainer:
         train_dataset = self.train_dataset
         test_dataset = self.test_dataset
         model = self.model
-        self.depth_data = test_dataset.depth_data
+        self.depth_data = bool(getattr(train_dataset, "depth_data", False))
         summary_writer = self.summary_writer
         reso_cur = self.reso_cur
 
@@ -389,13 +412,10 @@ class Trainer:
 
             # 当深度启用时 对于深度损失的处理
             # Loss on the rendered and gt depth maps.
-            if self.cfg.model.depth_loss and self.cfg.model.depth_loss_weight > 0:
-                depth_loss = (depth_map.unsqueeze(-1) - depth) ** 2
-                mask = depth != 0
-                depth_loss = (
-                    torch.mean(depth_loss[mask]) * self.cfg.model.depth_loss_weight
-                )
-                total_loss += depth_loss
+            if self.depth_supervision:
+                depth_loss = masked_depth_mse(depth_map, depth)
+                depth_loss = depth_loss * self.cfg.model.depth_loss_weight
+                total_loss = total_loss + depth_loss
                 summary_writer.add_scalar(
                     "train/depth_loss",
                     depth_loss.detach().item(),

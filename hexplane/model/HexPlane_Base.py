@@ -6,6 +6,7 @@ import torch.nn
 from torch.nn import functional as F
 
 from hexplane.model.mlp import General_MLP
+from hexplane.depth import render_depth
 from hexplane.model.sh import eval_sh_bases
 
 
@@ -198,6 +199,7 @@ class HexPlane_Base(torch.nn.Module):
         # Regulartization settings.
         self.random_background = kwargs.get("random_background", False)
         self.depth_loss = kwargs.get("depth_loss", False)
+        self.depth_render_mode = kwargs.get("depth_render_mode", "far")
 
     def init_density_func(
         self, DensityMode, t_pe, pos_pe, view_pe, fea_pe, featureC, n_layers, device
@@ -537,13 +539,18 @@ class HexPlane_Base(torch.nn.Module):
         rgb_map = rgb_map.clamp(0, 1)
 
         # Calculate depth.
+        # 这里的处理是吧深度损失打包到了单独的depth.py文件中
         if self.depth_loss:
-            depth_map = torch.sum(weight * z_vals, -1)
-            depth_map = depth_map + (1.0 - acc_map) * rays_chunk[..., -1]
+            depth_map = render_depth(
+                weight, z_vals, self.near_far[1],
+                getattr(self, "depth_render_mode", "far"),
+            )
         else:
             with torch.no_grad():
-                depth_map = torch.sum(weight * z_vals, -1)
-                depth_map = depth_map + (1.0 - acc_map) * rays_chunk[..., -1]
+                depth_map = render_depth(
+                    weight, z_vals, self.near_far[1],
+                    getattr(self, "depth_render_mode", "far"),
+                )
         return rgb_map, depth_map, alpha, z_vals
 
     @torch.no_grad()

@@ -70,6 +70,10 @@ class Model_Config:
     random_background: bool = False
     depth_loss: bool = False
     depth_loss_weight: float = 1.0
+    # 这里两个模式的区别在于怎么处理射线剩余的透明部分
+    # far是尝试将剩余部分放到提前定义的远平面距离 Σ(weight × z_vals) + (1-A) × far
+    # conditional则是只看前景贡献，归一化后求平均深度 Σ(weight × z_vals) / A
+    depth_render_mode: str = "far"  # "far" background or "conditional" foreground depth
     dist_loss: bool = False
     dist_loss_weight: float = 0.01
 
@@ -100,6 +104,13 @@ class Data_Config:
     scene_bbox_min: List[float] = field(default_factory=lambda: [-1.0, -1.0, -1.0])
     scene_bbox_max: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
     N_random_pose: int = 1000
+    # Optional DNeRF reference depths. None keeps existing RGB-only behavior.
+    depth_train_dir: Optional[str] = None
+    depth_test_dir: Optional[str] = None
+    depth_file_pattern: str = "{stem}.npy"  # Also supports {split} and {frame}.
+    depth_type: str = "ray_distance"  # "ray_distance" or positive "camera_z"
+    # 对应从npy文件中读取出来的数值的换算比例  默认1.0对应m 文件中读出来是3  那么对应深度就是3m
+    depth_scale: float = 1.0  # Multiply stored depth into scene-coordinate units.
     # for dnerf
 
     # for neural3D_NDC
@@ -149,6 +160,7 @@ class Config:
     render_train: bool = False
     render_test: bool = True
     render_path: bool = False
+    save_depth_raw: bool = True  # Save float32 .npy depths before color mapping.
 
     systems: System_Config = System_Config()
     model: Model_Config = Model_Config()

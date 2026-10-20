@@ -29,6 +29,9 @@ Both [D-NeRF dataset](https://github.com/albertpumarola/D-NeRF)  and [Plenoptic 
 
 Please change the "datadir" in config based on the locations of downloaded datasets.
 
+Optional external depth supervision is documented in [深度监督接口](docs/depth_supervision.md).
+It is disabled by default.
+
 # Reconstruction
 ```
 python main.py config=dnerf_slim.yaml
