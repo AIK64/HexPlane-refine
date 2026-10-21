@@ -89,8 +89,8 @@ class DNerfDataset(Dataset):
                 self.depth_dir = Path(datadir) / self.depth_dir
             if not self.depth_dir.is_dir():
                 raise FileNotFoundError(f"Reference depth directory does not exist: {self.depth_dir}")
-        if depth_type not in ("ray_distance", "camera_z"):
-            raise ValueError("depth_type must be 'ray_distance' or 'camera_z'.")
+        if depth_type not in ("ray_distance", "camera_z", "relative_camera_z"):
+            raise ValueError("depth_type must be ray_distance, camera_z or relative_camera_z.")
         if not np.isfinite(depth_scale) or depth_scale <= 0:
             raise ValueError("depth_scale must be finite and positive.")
         self.depth_file_pattern = depth_file_pattern
@@ -212,10 +212,9 @@ class DNerfDataset(Dataset):
         if self.depth_type == "camera_z":
             depth = depth / self.directions[..., 2].abs().clamp_min(1e-8)
         depth = depth.reshape(-1, 1)
-        valid = (
-            torch.isfinite(depth) & (depth >= self.near) & (depth <= self.far)
-            & (alpha.reshape(-1, 1) > 0)
-        )
+        valid = torch.isfinite(depth) & (depth > 0) & (alpha.reshape(-1, 1) > 0)
+        if self.depth_type != "relative_camera_z":
+            valid &= (depth >= self.near) & (depth <= self.far)
         return torch.where(valid, depth, 0)
 
     def read_meta(self):

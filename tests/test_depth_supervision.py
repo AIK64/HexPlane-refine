@@ -12,7 +12,7 @@ from PIL import Image
 
 from config.config import Config
 from hexplane.dataloader.dnerf_dataset import DNerfDataset
-from hexplane.depth import masked_depth_mse, render_depth
+from hexplane.depth import masked_depth_mse, render_depth, relative_depth_l1
 from hexplane.model import init_model
 from hexplane.render.render import evaluation
 from hexplane.render.trainer import Trainer
@@ -251,6 +251,68 @@ class DepthSupervisionTests(unittest.TestCase):
         self.assertTrue((output / "000.png").is_file())
         self.assertFalse((output / "depth_raw").exists())
         self.assertFalse((output / "depth_metrics.json").exists())
+
+    def test_relative_loss_ignores_positive_scale_and_shift(self):
+        target = torch.linspace(0.4, 1.4, 32)
+        prediction = (target * 4 + 2).requires_grad_()
+        self.assertLess(relative_depth_l1(prediction, target).item(), 1e-5)
+        loss = relative_depth_l1(prediction, target.roll(7))
+        self.assertGreater(loss.item(), 0.5)
+        loss.backward()
+        self.assertTrue(torch.isfinite(prediction.grad).all())
+        self.assertGreater(prediction.grad.abs().sum().item(), 0)
+        self.assertEqual(relative_depth_l1(prediction[:4], target[:4]).item(), 0)
+        self.assertEqual(relative_depth_l1(prediction, torch.ones(32)).item(), 0)
+
+    def test_relative_images_training_and_warmup(self):
+        values = np.linspace(0.4, 1.4, 64, dtype=np.float32).reshape(8, 8)
+        for i in range(2):
+            np.save(self.root / "depth/train" / f"r_{i}.npy", values)
+        train = self.dataset(stack=True, depth_type="relative_camera_z")
+        self.assertEqual(int((train.all_depths > 0).sum()), 30)
+        self.assertLess(train.all_depths.max().item(), 2)
+        test = DNerfDataset(str(self.root), split="test", downsample=200, is_stack=True)
+        cfg = self.cfg()
+        cfg.data.datasampler_type = "images"
+        cfg.model.depth_loss_type = "relative"
+        cfg.model.depth_loss_start = 1
+        cfg.model.depth_loss_weight = 0.01
+        cfg.optim.batch_size = 16
+        model, reso = init_model(cfg, train.scene_bbox, train.near_far, "cpu")
+        writer = Writer()
+        trainer = Trainer(model, cfg, reso, train, test, writer, str(self.root / "relative_run"), "cpu")
+        trainer.train()
+        logged = [value for tag, value in writer.scalars if tag == "train/depth_loss"]
+        self.assertEqual(len(logged), 1)  # First iteration is RGB-only warmup.
+        self.assertTrue(np.isfinite(logged[0]))
+        self.assertGreater(logged[0], 0)
+        cfg.data.datasampler_type = "rays"
+        with self.assertRaisesRegex(ValueError, "images"):
+            Trainer(model, cfg, reso, train, test, Writer(), str(self.root), "cpu")
+        cfg.model.depth_loss_type = "mse"
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            Trainer(model, cfg, reso, train, test, Writer(), str(self.root), "cpu")
+
+    def test_relative_evaluation_does_not_report_metric_distance_errors(self):
+        cfg = self.cfg()
+        plain = DNerfDataset(str(self.root), split="test", downsample=200, is_stack=True)
+        # Match a positive affine transform of predicted camera-Z, not world-Z.
+        relative = 0.2 + 0.1 * 4.0 * plain.directions[..., 2].abs().numpy()
+        original = relative.repeat(2, axis=0).repeat(2, axis=1)
+        for i in range(2):
+            np.save(self.root / "depth/test" / f"r_{i}.npy", original)
+        dataset = self.dataset(split="test", stack=True, depth_type="relative_camera_z")
+        def renderer(rays, times, model, **kwargs):
+            size = rays.shape[0]
+            return torch.full((size, 3), 0.4), None, torch.full((size,), 4.0), None, None
+        output = self.root / "relative_eval"
+        with patch("hexplane.render.render.OctreeRender_trilinear_fast", side_effect=renderer), patch("hexplane.render.render.imageio.mimwrite"):
+            evaluation(dataset, SimpleNamespace(), cfg, str(output), N_vis=-1, compute_extra_metrics=False, device="cpu")
+        metrics = json.loads((output / "depth_metrics.json").read_text())
+        self.assertNotIn("mae", metrics)
+        self.assertNotIn("rmse", metrics)
+        self.assertLess(metrics["relative_l1"], 1e-4)
+        self.assertEqual(metrics["valid_pixels"], 30)
 
 
 if __name__ == "__main__":

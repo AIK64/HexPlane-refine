@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from pytorch_msssim import ms_ssim as MS_SSIM
 from tqdm.auto import tqdm
-from hexplane.depth import depth_pairs
+from hexplane.depth import depth_pairs, normalized_depth_pairs
 
 from hexplane.render.util.metric import rgb_lpips, rgb_ssim
 from hexplane.render.util.util import visualize_depth_numpy
@@ -80,6 +80,7 @@ def evaluation(
     PSNRs, rgb_maps, depth_maps, gt_depth_maps = [], [], [], []
     msssims, ssims, l_alex, l_vgg = [], [], [], []
     depth_results = []
+    relative_depth = getattr(test_dataset, "depth_type", "") == "relative_camera_z"
     depth_abs_sum, depth_sq_sum, depth_count = 0.0, 0.0, 0
     os.makedirs(savePath, exist_ok=True)
     os.makedirs(savePath + "/rgbd", exist_ok=True)
@@ -125,20 +126,28 @@ def evaluation(
         depth = data.get("depths")
         if depth is not None:
             depth = depth.detach().cpu().reshape(H, W)
-            prediction, reference, valid = depth_pairs(depth_map, depth)
+            predicted_depth = depth_map
+            if relative_depth:
+                predicted_depth = depth_map * test_dataset.directions[..., 2].abs().cpu()
+            prediction, reference, valid = depth_pairs(predicted_depth, depth)
             count = int(valid.sum().item())
-            error = prediction[valid] - reference[valid]
-            abs_sum = error.abs().double().sum().item()
-            sq_sum = error.double().square().sum().item()
-            depth_abs_sum += abs_sum
-            depth_sq_sum += sq_sum
             depth_count += count
-            depth_results.append({
-                "index": idx, "valid_pixels": count,
-                "mae": abs_sum / count if count else None,
-                "rmse": (sq_sum / count) ** 0.5 if count else None,
-            })
-            gt_depth, _ = visualize_depth_numpy(depth.numpy(), near_far)
+            if relative_depth:
+                normalized = normalized_depth_pairs(predicted_depth, depth)
+                score = (normalized[0] - normalized[1]).abs().mean().item() if normalized else None
+                depth_results.append({"index": idx, "valid_pixels": count, "relative_l1": score})
+            else:
+                error = prediction[valid] - reference[valid]
+                abs_sum = error.abs().double().sum().item()
+                sq_sum = error.double().square().sum().item()
+                depth_abs_sum += abs_sum
+                depth_sq_sum += sq_sum
+                depth_results.append({
+                    "index": idx, "valid_pixels": count,
+                    "mae": abs_sum / count if count else None,
+                    "rmse": (sq_sum / count) ** 0.5 if count else None,
+                })
+            gt_depth, _ = visualize_depth_numpy(depth.numpy(), None if relative_depth else near_far)
             if cfg.save_depth_raw:
                 np.save(f"{savePath}/depth_raw/{prefix}{idx:03d}_gt.npy", depth.numpy())
         depth_map, _ = visualize_depth_numpy(raw_depth, near_far)
@@ -238,9 +247,21 @@ def evaluation(
             "rmse": (depth_sq_sum / depth_count) ** 0.5 if depth_count else None,
             "frames": depth_results,
         }
+        if relative_depth:
+            scores = [frame["relative_l1"] for frame in depth_results if frame["relative_l1"] is not None]
+            depth_metrics = {
+                "depth_type": "relative_camera_z", "units": "dimensionless",
+                "prediction_raw_depth_type": "ray_distance",
+                "aggregation": "mean of per-frame median/MAD-normalized L1",
+                "valid_pixels": depth_count,
+                "relative_l1": float(np.mean(scores)) if scores else None,
+                "frames": depth_results,
+            }
         with open(f"{savePath}/{prefix}depth_metrics.json", "w", encoding="utf-8") as f:
             json.dump(depth_metrics, f, indent=2, allow_nan=False)
-        if depth_count:
+        if relative_depth:
+            print(f"Relative depth normalized L1: {depth_metrics['relative_l1']}")
+        elif depth_count:
             print(f"Depth MAE: {depth_metrics['mae']:.6f}, RMSE: {depth_metrics['rmse']:.6f}")
     return PSNRs
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from tqdm.auto import tqdm
-from hexplane.depth import masked_depth_mse
+from hexplane.depth import masked_depth_mse, relative_depth_l1
 
 from hexplane.render.render import OctreeRender_trilinear_fast as renderer
 from hexplane.render.render import evaluation
@@ -59,6 +59,11 @@ class Trainer:
         if cfg.model.depth_loss_weight < 0:
             raise ValueError("depth_loss_weight must be non-negative.")
         self.depth_supervision = cfg.model.depth_loss and cfg.model.depth_loss_weight > 0
+        self.relative_depth = cfg.model.depth_loss_type == "relative"
+        if cfg.model.depth_loss_type not in ("mse", "relative"):
+            raise ValueError("depth_loss_type must be mse or relative.")
+        if cfg.model.depth_loss_start < 0:
+            raise ValueError("depth_loss_start must be non-negative.")
         if self.depth_supervision and not self.depth_data:
             raise ValueError(
                 "Depth loss is enabled but the training dataset has no reference depths. "
@@ -69,6 +74,15 @@ class Trainer:
                 "Metric depth supervision for neural3D_NDC is not supported: "
                 "reference distances must first be converted to NDC ray parameters."
             )
+        if self.depth_supervision:
+            relative_data = getattr(train_dataset, "depth_type", "") == "relative_camera_z"
+            if self.relative_depth != relative_data:
+                raise ValueError("Use relative loss with relative_camera_z data; mse needs absolute depths.")
+            if self.relative_depth and (
+                cfg.data.datasampler_type != "images"
+                or not hasattr(train_dataset, "directions")
+            ):
+                raise ValueError("Relative depth currently requires DNeRF with datasampler_type=images.")
         self.model.depth_loss = self.depth_supervision
         self.model.depth_render_mode = cfg.model.depth_render_mode
 
@@ -165,6 +179,11 @@ class Trainer:
             frame_time = frame_time[select_inds]
             if self.depth_data:
                 train_depth = data["depths"].to(self.device).view(-1, 1)[select_inds]
+                if self.relative_depth:
+                    # These are camera-space directions, not world-space rays[:, 5].
+                    self.sampled_depth_cos = train_dataset.directions.reshape(-1, 3)[
+                        select_inds, 2
+                    ].abs().to(self.device)
         # hierarchical sampling from dyNeRF: hierachical sampling involves three stages of samplings.
         elif self.cfg.data.datasampler_type == "hierach":
             # Stage 1: randomly sample a single image from an arbitrary camera.
@@ -412,8 +431,11 @@ class Trainer:
 
             # 当深度启用时 对于深度损失的处理
             # Loss on the rendered and gt depth maps.
-            if self.depth_supervision:
-                depth_loss = masked_depth_mse(depth_map, depth)
+            if self.depth_supervision and iteration >= self.cfg.model.depth_loss_start:
+                if self.relative_depth:
+                    depth_loss = relative_depth_l1(depth_map * self.sampled_depth_cos, depth)
+                else:
+                    depth_loss = masked_depth_mse(depth_map, depth)
                 depth_loss = depth_loss * self.cfg.model.depth_loss_weight
                 total_loss = total_loss + depth_loss
                 summary_writer.add_scalar(

@@ -1,0 +1,35 @@
+systems:
+  basedir: "./logs"
+
+model:
+  N_voxel_init: 262144
+  time_grid_init: 16
+  time_grid_final: 24
+  upsampling_type: unaligned
+  upsample_list: [3000, 6000, 9000]
+  update_emptymask_list: [4000, 8000, 10000]
+  depth_loss: true
+  depth_loss_type: relative
+  depth_loss_weight: 0.01
+  depth_loss_start: 3000
+  depth_render_mode: far
+
+data:
+  datadir: "../dataset/DNeRF/lego-with-depth"
+  scene_bbox_min: [-1.5, -1.5, -1.5]
+  scene_bbox_max: [1.5, 1.5, 1.5]
+  downsample: 2.0
+  datasampler_type: images
+  depth_train_dir: "depth/train"
+  depth_test_dir: "depth/test"
+  depth_file_pattern: "{stem}.npy"
+  depth_type: relative_camera_z
+  depth_scale: 1.0
+
+optim:
+  n_iters: 25000
+
+render_test: true
+render_path: true
+save_depth_raw: true
+expname: lego_images_relative_depth

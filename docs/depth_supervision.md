@@ -73,3 +73,31 @@ Trainer 的 `hierach` 分支支持从自定义数据集的
 
 相机路径渲染也保存原始预测深度。`save_depth_raw: false` 可关闭原始数组保存。
 深度伪彩色图和视频仍保留，但不应用于定量计算。
+
+## DA3 相对深度：images 模式
+
+现有 images 采样器每次选一张图，再从该图选择 batch_size 条射线，
+因此无需另建采样器或在 rays 模式里增加帧编号分组。
+
+示例配置：`config/dnerf_slim_lego_relative_depth.yaml`。
+
+```powershell
+# 相同 images 采样的 RGB 对照实验
+python main.py config=./config/dnerf_slim_lego_relative_depth.yaml model.depth_loss=False expname=lego_images_rgb
+
+# 相对深度实验，前 3000 次迭代只用 RGB 和原有正则
+python main.py config=./config/dnerf_slim_lego_relative_depth.yaml
+```
+
+关键组合是 `data.datasampler_type: images`、`data.depth_type: relative_camera_z`、
+`model.depth_loss_type: relative`。其他采样模式暂不允许开启这个相对损失。
+`depth_loss_start` 默认 0；示例设为 3000，`depth_loss_weight: 0.01` 是实验起始值。
+
+相对相机 Z 深度不转换成射线距离，也不按 near/far 范围过滤。
+训练时将预测射线深度乘以相机空间单位方向的 Z 分量绝对值，转换成相机 Z 深度。
+在同一张图的有效采样像素上，将预测和参考各自减去中位数、除以平均绝对偏差，
+再计算归一化 L1。有效点不足 8 个或参考深度为常量时跳过该批次的深度项。
+这个损失约束相对形状，不提供真实距离尺度，也不自动消除伪深度中的几何错误。
+
+相对模式的测试 JSON 报告逐帧归一化 L1，不报告距离单位下的 MAE/RMSE。
+保存的预测原始数组仍是射线距离，参考数组则是相对相机 Z 深度，不能直接相减。

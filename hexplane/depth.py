@@ -42,3 +42,25 @@ def masked_depth_mse(prediction, target):
         # Empty batches contribute zero without breaking the autograd graph.
         return prediction[:0].sum()
     return (prediction[valid] - target[valid]).square().mean()
+
+
+def normalized_depth_pairs(prediction, target):
+    """Normalize one image's valid camera-Z depths; never mix independent images."""
+    prediction, target, valid = depth_pairs(prediction, target)
+    if valid.sum() < 8:
+        return None  # Too few foreground pixels to estimate a stable image statistic.
+    prediction, target = prediction[valid], target[valid]
+    target = target - target.median()
+    target_scale = target.abs().mean()
+    if target_scale <= 1e-6:
+        return None  # Constant pseudo-depth carries no relative shape information.
+    prediction = prediction - prediction.median()
+    prediction = prediction / prediction.abs().mean().clamp_min(1e-6)
+    return prediction, target / target_scale
+
+
+def relative_depth_l1(prediction, target):
+    normalized = normalized_depth_pairs(prediction, target)
+    if normalized is None:
+        return prediction.reshape(-1)[:0].sum()
+    return (normalized[0] - normalized[1]).abs().mean()

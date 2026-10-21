@@ -70,6 +70,8 @@ class Model_Config:
     random_background: bool = False
     depth_loss: bool = False
     depth_loss_weight: float = 1.0
+    depth_loss_type: str = "mse"  # "mse" for absolute GT; "relative" for per-image pseudo-depth.
+    depth_loss_start: int = 0  # Iteration at which depth supervision starts.
     # 这里两个模式的区别在于怎么处理射线剩余的透明部分
     # far是尝试将剩余部分放到提前定义的远平面距离 Σ(weight × z_vals) + (1-A) × far
     # conditional则是只看前景贡献，归一化后求平均深度 Σ(weight × z_vals) / A
@@ -108,8 +110,8 @@ class Data_Config:
     depth_train_dir: Optional[str] = None
     depth_test_dir: Optional[str] = None
     depth_file_pattern: str = "{stem}.npy"  # Also supports {split} and {frame}.
-    depth_type: str = "ray_distance"  # "ray_distance" or positive "camera_z"
-    # 对应从npy文件中读取出来的数值的换算比例  默认1.0对应m 文件中读出来是3  那么对应深度就是3m
+    depth_type: str = "ray_distance"  # "ray_distance", "camera_z", "relative_camera_z"
+    # 1.0 保留原始数值尺度；场景单位不一定是米，相对深度模式会进一步归一化。
     depth_scale: float = 1.0  # Multiply stored depth into scene-coordinate units.
     # for dnerf
 
